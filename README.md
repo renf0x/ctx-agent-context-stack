@@ -67,10 +67,7 @@ on marketing estimates.
 
 - Python 3.10+
 - Optional: Node.js and CodeGraph
-- Obsidian plus the `obsidian-mcp` server (per project) so an agent can query
-  the vault — notes, search, `[[links]]`, and backlinks. The vault is plain
-  Markdown and still readable without it; the MCP is what gives the agent
-  programmatic access. See "Obsidian" below.
+- Optional: Obsidian (a human-facing viewer for the memory vault)
 - A supported RLM provider if you want semantic large-context queries
 
 Install CodeGraph:
@@ -294,31 +291,10 @@ ctx memory open --install-obsidian
 On Windows the command uses `winget` when available. Otherwise it downloads the
 installer only from the official `obsidianmd/obsidian-releases` GitHub repository.
 
-### Agent access via MCP (required for programmatic vault use)
-
-For an agent to work with the vault — read notes, search, and follow
-`[[links]]`/backlinks (the data behind the graph) — add the filesystem
-`obsidian-mcp` server, scoped **per project** so each project uses its own
-vault:
-
-```json
-{
-  "mcpServers": {
-    "obsidian": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "obsidian-mcp", "<absolute-path-to>/memory"]
-    }
-  }
-}
-```
-
-This reads the vault folder directly: no Obsidian plugin, no API key, and
-Obsidian does not need to be running. You can still open the same folder in the
-Obsidian GUI to edit and view the graph — both operate on the same files. The
-visual graph is a GUI feature; the MCP exposes the link data, not the rendered
-image. Prefer this filesystem server over REST-based Obsidian MCPs for agents:
-it is headless, secret-free, and naturally one-vault-per-project.
+No Obsidian MCP server is required. The vault is plain Markdown: an agent reads
+the notes, searches, and follows `[[links]]`/backlinks directly through normal
+file access. Obsidian itself is only a human-facing viewer for the graph and
+editing — both operate on the same files.
 
 ## CodeGraph
 
