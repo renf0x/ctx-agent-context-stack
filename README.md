@@ -114,6 +114,20 @@ python install.py . --agents generic,claude
 python install.py . --agents all
 ```
 
+### Global install (optional)
+
+`install.py` drops a local `ctx.py` / `rlm.py` copy into each project, invoked
+as `python ctx.py <cmd>`. To get the shorter `ctx` / `rlm` commands that resolve
+from any folder, install the package once:
+
+```powershell
+pip install .
+```
+
+This registers three console scripts — `ctx`, `rlm`, and `ctx-rlm-login`. A
+local `ctx.py` copy still takes priority when present, so per-project pinning
+keeps working.
+
 ## Normal Usage
 
 ### How to invoke (`ctx`/`rlm` vs `python ctx.py`)
