@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tvl-rlm"
-version = "0.0.2"
+version = "0.0.3"
 description = "CTX Agent Context Stack: token budgeting, RLM delegation, CodeGraph retrieval, durable memory, and cross-agent handoff for coding agents."
 readme = "README.md"
 requires-python = ">=3.10"

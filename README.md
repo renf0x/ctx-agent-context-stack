@@ -3,7 +3,7 @@
 **Token budgeting, RLM delegation, CodeGraph retrieval, durable memory, and
 cross-agent handoff for coding agents.**
 
-**Version: 0.0.2**
+**Version: 0.0.3**
 
 CTX Agent Context Stack is an experimental, portable toolkit that combines
 several context-engineering methods. Its goal is to stop coding agents from

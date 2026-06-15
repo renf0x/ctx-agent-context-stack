@@ -13,7 +13,7 @@ Subcommands:
 
 from __future__ import annotations
 
-__version__ = "0.0.2"
+__version__ = "0.0.3"
 
 import argparse
 import datetime
@@ -916,6 +916,8 @@ def cmd_rlm(args: argparse.Namespace) -> int:
                         max_depth=args.max_depth, prefilter=not args.no_prefilter)
     try:
         resolved = args.provider if args.provider == "fake" else rlm.pick_provider(args.provider)
+        if args.provider == "auto":
+            sys.stderr.write(f"[ctx] auto-selected provider: {resolved}\n")
         # one-command UX: if Gemini subscription is requested but not logged in yet,
         # bootstrap the OAuth browser flow automatically, then continue.
         if resolved == "gemini-oauth" and not rlm.gemini_creds_path().is_file():
@@ -1016,6 +1018,15 @@ def cmd_report(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- main ----
 
 def main(argv: list[str] | None = None) -> int:
+    # Legacy Windows consoles default to cp1251/cp866, which cannot encode
+    # characters that routinely appear in answers (arrows, em dashes, etc.).
+    # Force UTF-8 so output never crashes with UnicodeEncodeError.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+        except (AttributeError, ValueError):
+            pass
+
     ap = argparse.ArgumentParser(prog="ctx.py", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)

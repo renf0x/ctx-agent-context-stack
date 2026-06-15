@@ -24,7 +24,7 @@ CLI and a Graphify export are all optional and only touched by the real backends
 
 from __future__ import annotations
 
-__version__ = "0.0.2"
+__version__ = "0.0.3"
 
 import base64
 import io
@@ -98,20 +98,44 @@ def grep(text: str, pattern: str, flags: int = re.IGNORECASE) -> list[str]:
     return [ln for ln in text.splitlines() if rx.search(ln)]
 
 
+_FILE_MARKER = re.compile(r"^\s*===== FILE: .+ =====\s*$")
+
+
 def chunk_text(text: str, chunk_tokens: int) -> list[str]:
-    """Split on line boundaries into ~chunk_tokens-sized pieces."""
+    """Split on line boundaries into ~chunk_tokens-sized pieces.
+
+    When the text carries ``===== FILE: <path> =====`` provenance markers (as
+    produced by directory collection), every emitted chunk is prefixed with the
+    marker of the file it starts inside. A fragment therefore never loses the
+    real path it came from, which stops sub-LMs from inventing file names."""
     budget = max(1, int(chunk_tokens * CHARS_PER_TOKEN))
     out: list[str] = []
     buf: list[str] = []
     size = 0
+    current_marker = ""   # most recent FILE marker seen
+    start_marker = ""     # marker active when the current buffer began
+
+    def flush() -> None:
+        nonlocal buf, size
+        if not buf:
+            return
+        body = "".join(buf)
+        if start_marker and not body.lstrip().startswith("===== FILE:"):
+            body = start_marker + body
+        out.append(body)
+        buf, size = [], 0
+
     for line in text.splitlines(keepends=True):
+        if not buf:
+            start_marker = current_marker
+        if _FILE_MARKER.match(line):
+            current_marker = line if line.endswith("\n") else line + "\n"
         if size + len(line) > budget and buf:
-            out.append("".join(buf))
-            buf, size = [], 0
+            flush()
+            start_marker = current_marker
         buf.append(line)
         size += len(line)
-    if buf:
-        out.append("".join(buf))
+    flush()
     return out or [text]
 
 
@@ -135,6 +159,11 @@ def leaf_prompt(query: str, fragment: str, max_words: int) -> str:
     return (
         "Answer the QUESTION using ONLY the FRAGMENT below.\n"
         "If the fragment has nothing relevant, reply exactly: NO_INFO\n"
+        "Ground every claim in the fragment. Only name files, paths, symbols, or "
+        "identifiers that appear VERBATIM in the fragment - the "
+        "'===== FILE: <path> =====' headers give the real file paths. Never guess, "
+        "complete, or invent a path or name; if you cannot ground it in the "
+        "fragment, leave it out.\n"
         f"Be terse - facts only, at most ~{max_words} words.\n\n"
         f"QUESTION: {query}\n\n--- FRAGMENT ---\n{fragment}"
     )
@@ -145,7 +174,10 @@ def reduce_prompt(query: str, notes: list[str]) -> str:
     return (
         "Synthesise ONE answer to the QUESTION from the partial NOTES below.\n"
         "Notes saying NO_INFO carry no information - ignore them.\n"
-        "Do not invent facts beyond the notes. Be concise.\n\n"
+        "Do not invent facts beyond the notes. Only cite file paths, symbols, and "
+        "identifiers that appear verbatim in the notes - never normalise, complete, "
+        "or guess a path. If the notes do not establish something, say it was not "
+        "found rather than inventing it. Be concise.\n\n"
         f"QUESTION: {query}\n\nNOTES:\n{joined}"
     )
 
