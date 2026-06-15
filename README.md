@@ -3,6 +3,8 @@
 **Token budgeting, RLM delegation, CodeGraph retrieval, durable memory, and
 cross-agent handoff for coding agents.**
 
+**Version: 0.0.1**
+
 CTX Agent Context Stack is an experimental, portable toolkit that combines
 several context-engineering methods. Its goal is to stop coding agents from
 re-reading an entire repository and a long chat history on every turn.
@@ -65,7 +67,10 @@ on marketing estimates.
 
 - Python 3.10+
 - Optional: Node.js and CodeGraph
-- Optional: Obsidian
+- Obsidian plus the `obsidian-mcp` server (per project) so an agent can query
+  the vault — notes, search, `[[links]]`, and backlinks. The vault is plain
+  Markdown and still readable without it; the MCP is what gives the agent
+  programmatic access. See "Obsidian" below.
 - A supported RLM provider if you want semantic large-context queries
 
 Install CodeGraph:
@@ -111,6 +116,15 @@ python install.py . --agents all
 
 ## Normal Usage
 
+### How to invoke (`ctx`/`rlm` vs `python ctx.py`)
+
+Commands below are written as `ctx <cmd>` / `rlm` — the canonical entry points
+when the toolkit is installed so it resolves from any folder. `install.py`
+instead drops a local `ctx.py` / `rlm.py` copy into the project root; that copy
+is invoked as `python ctx.py <cmd>` / `python rlm.py`. **Rule: a local `ctx.py`
+in the working directory takes priority; otherwise use the global `ctx`/`rlm`
+command.** Both share the same `.ctx/ledger.jsonl` log and behave identically.
+
 The user should not need to type these commands for every task. Installed agent
 instructions tell supported agents to use the protocol automatically.
 
@@ -118,28 +132,28 @@ Manual commands are useful for diagnostics:
 
 ```powershell
 # Estimate repository context cost
-python ctx.py map
+ctx map
 
 # Summarize a large file structurally
-python ctx.py digest src/large-file.ts
+ctx digest src/large-file.ts
 
 # Filter noisy output while retaining the complete local log
-python ctx.py run -- npm test
+ctx run -- npm test
 
 # Build a small task context
-python ctx.py memory context "fix progress persistence"
+ctx memory context "fix progress persistence"
 
 # Ask about durable project memory
-python ctx.py memory query "which architectural decisions affect progress?"
+ctx memory query "which architectural decisions affect progress?"
 
 # Ask about memory plus the entire source tree
-python ctx.py memory query "how does progress persistence work?" --scope project
+ctx memory query "how does progress persistence work?" --scope project
 
 # Validate links, size limits, journals, and protected rules
-python ctx.py memory check
+ctx memory check
 
 # Show measured savings
-python ctx.py report
+ctx report
 ```
 
 ## RLM Sub-Agent Options
@@ -166,24 +180,24 @@ Examples:
 
 ```powershell
 # Reuse a Codex subscription login
-python ctx.py memory query "describe the architecture" --scope project `
+ctx memory query "describe the architecture" --scope project `
   --provider openai-oauth
 
 # Reuse Claude CLI
-python ctx.py memory query "find risky architectural coupling" --scope project `
+ctx memory query "find risky architectural coupling" --scope project `
   --provider cli
 
 # Gemini subscription through Google's official CLI
-python ctx.py memory query "summarize previous investigations" `
+ctx memory query "summarize previous investigations" `
   --provider gemini-cli
 
 # Custom Gemini OAuth application
 $env:GEMINI_OAUTH_CLIENT_ID = "your-client-id"
 $env:GEMINI_OAUTH_CLIENT_SECRET = "your-client-secret"
-python ctx.py gemini-login
+ctx gemini-login
 
 # API keys can also be placed in a local .env
-python ctx.py memory query "what decisions are still active?" --provider auto
+ctx memory query "what decisions are still active?" --provider auto
 ```
 
 ### Important Limit Note
@@ -249,7 +263,7 @@ without explicit approval.
 After an approved change:
 
 ```powershell
-python ctx.py memory rules-approve --user-approved
+ctx memory rules-approve --user-approved
 ```
 
 `memory check` reports unapproved rule changes.
@@ -260,11 +274,37 @@ The memory directory is a plugin-free Obsidian-compatible vault. Obsidian is
 optional; all files remain normal Markdown.
 
 ```powershell
-python ctx.py memory open --install-obsidian
+ctx memory open --install-obsidian
 ```
 
 On Windows the command uses `winget` when available. Otherwise it downloads the
 installer only from the official `obsidianmd/obsidian-releases` GitHub repository.
+
+### Agent access via MCP (required for programmatic vault use)
+
+For an agent to work with the vault — read notes, search, and follow
+`[[links]]`/backlinks (the data behind the graph) — add the filesystem
+`obsidian-mcp` server, scoped **per project** so each project uses its own
+vault:
+
+```json
+{
+  "mcpServers": {
+    "obsidian": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "obsidian-mcp", "<absolute-path-to>/memory"]
+    }
+  }
+}
+```
+
+This reads the vault folder directly: no Obsidian plugin, no API key, and
+Obsidian does not need to be running. You can still open the same folder in the
+Obsidian GUI to edit and view the graph — both operate on the same files. The
+visual graph is a GUI feature; the MCP exposes the link data, not the rendered
+image. Prefer this filesystem server over REST-based Obsidian MCPs for agents:
+it is headless, secret-free, and naturally one-vault-per-project.
 
 ## CodeGraph
 
