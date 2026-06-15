@@ -24,7 +24,7 @@ CLI and a Graphify export are all optional and only touched by the real backends
 
 from __future__ import annotations
 
-__version__ = "0.0.1"
+__version__ = "0.0.2"
 
 import base64
 import io

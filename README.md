@@ -3,7 +3,7 @@
 **Token budgeting, RLM delegation, CodeGraph retrieval, durable memory, and
 cross-agent handoff for coding agents.**
 
-**Version: 0.0.1**
+**Version: 0.0.2**
 
 CTX Agent Context Stack is an experimental, portable toolkit that combines
 several context-engineering methods. Its goal is to stop coding agents from
@@ -281,15 +281,23 @@ ctx memory rules-approve --user-approved
 
 ## Obsidian
 
-The memory directory is a plugin-free Obsidian-compatible vault. Obsidian is
-optional; all files remain normal Markdown.
+`memory/` is itself a plugin-free Obsidian vault: `memory init` writes a
+committed `.obsidian/` config (only machine-local `workspace.json`/`cache` is
+ignored). Because the vault lives **in the repository**, it is shared — clone
+the project and the common memory comes with it, ready to open in Obsidian and
+readable by every agent, including Codex. Do not keep durable memory in any
+agent's private store outside the repo.
 
 ```powershell
 ctx memory open --install-obsidian
 ```
 
-On Windows the command uses `winget` when available. Otherwise it downloads the
-installer only from the official `obsidianmd/obsidian-releases` GitHub repository.
+This registers and opens the **`memory/` folder** as the vault (it also closes
+a running Obsidian first so the registration is not overwritten). Open the
+`memory/` subfolder — not the project root: opening the root pulls in
+`node_modules`/`dist` READMEs and clutters the graph. On Windows the command
+uses `winget` when available; otherwise it downloads the installer only from the
+official `obsidianmd/obsidian-releases` GitHub repository.
 
 No Obsidian MCP server is required. The vault is plain Markdown: an agent reads
 the notes, searches, and follows `[[links]]`/backlinks directly through normal
@@ -319,7 +327,11 @@ dist/
 build/
 ```
 
-Commit the memory Markdown files if shared durable project knowledge is desired.
+Commit the whole `memory/` vault — the notes plus `.obsidian/app.json` /
+`templates.json`. It is the shared, cross-agent durable knowledge and is meant
+to travel with the repo so anyone who clones gets the same memory, ready for
+Obsidian. Only `memory/.obsidian/workspace.json` and `cache` stay machine-local
+(handled by the vault's own `.gitignore`).
 
 ## Status
 
