@@ -19,6 +19,7 @@ OpenCode, and other agents that can read project files or run shell commands.
 | **CTX map** | Estimates which project files are expensive to read |
 | **CTX digest** | Replaces a large file with a structural summary |
 | **CTX run** | Filters long test/build logs and saves the full output locally |
+| **CTX rawcount** | Measures the unsqueezed baseline context size with no compression |
 | **TVL ledger** | Measures admitted and avoided tokens instead of guessing savings |
 | **RLM** | Delegates questions over large contexts to recursive sub-agent calls |
 | **CodeGraph** | Retrieves symbols, dependencies, and affected tests |
@@ -50,6 +51,83 @@ limited CodeGraph context
 ```
 
 Detailed notes, archives, source files, and logs are retrieved only when needed.
+
+## Current Evidence and Limits
+
+This project is still being tested. The current evidence supports **measured
+context reduction**, not a blanket claim of lower provider billing or better
+answers in every agent session.
+
+What has been observed in a real-project audit on a safe copy of `TravelAgent`
+(`docs/token-memory-audit.md`):
+
+- Full copied project size: approximately **354,000 estimated tokens**.
+- Recommended startup packet (`AGENTS.md`, `handoff.md`, `PROJECT_CONTEXT.md`,
+  `memory/MEMORY.md`): approximately **5,900 estimated tokens**. This is a
+  **59.5x smaller startup baseline than a full-project read**, not proof that a
+  normal Codex/Claude session would otherwise read the entire project.
+- `ctx digest` on 10 expensive files reduced admitted text from approximately
+  **98,900 to 5,000 estimated tokens** (**19.6x smaller**). This proves
+  deterministic text reduction by the tool, not actual provider usage savings
+  unless the agent would otherwise have read those full files.
+- The memory vault improved continuity by preserving stable architecture,
+  operations, CRM/admin, CSS, and SQL-consolidation facts outside chat history.
+
+What is **not yet proven**:
+
+- Statistically robust end-to-end provider-token savings for Codex/Claude
+  sessions. That requires repeated A/B benchmarks using provider usage metrics,
+  equal tasks, equal models, fresh sessions, measured tool output, and task
+  success scoring.
+- RLM answer-quality improvement on private repositories. Real external-provider
+  runs were blocked in the audit environment because they would send private
+  repository content to external services.
+- Higher compression is not automatically better. The audit found that
+  `supabase/seed.sql` compressed from about **8,500 to 19 tokens**; this is a
+  warning sign that the current generic digest can discard too much SQL meaning.
+  SQL and CSS need file-type-aware digesters and recall tests.
+
+Use the current numbers as **context-admission evidence**: CTX can show how much
+text it avoided putting in the agent-visible context. Treat the current
+end-to-end limit result below as preliminary until it is repeated.
+
+### Preliminary Claude Code A/B Benchmark
+
+A controlled synthetic task was run once in two fresh Claude Code sessions:
+
+- `without-ctx`: normal search/read workflow.
+- `with-ctx`: mandatory `ctx rawcount`, `ctx map`, `ctx digest`, and `ctx run`
+  rules before source inspection and verification.
+
+Both runs solved the same weather-state bug and passed the same focused test.
+The observed Claude Code session-limit meter changed as follows:
+
+| Metric | Without CTX | With CTX | Difference |
+|---|---:|---:|---:|
+| Session before | 19% | 22% | n/a |
+| Session after | 22% | 24% | n/a |
+| Visible session spend | **3 percentage points** | **2 percentage points** | **1 pp lower** |
+| Weekly before | 2% | 3% | n/a |
+| Weekly after | 3% | 3% | n/a |
+| Visible weekly spend | **1 percentage point** | **0 visible pp** | below display threshold |
+
+The CTX ledger for the `with-ctx` run recorded:
+
+```text
+op        calls   raw tokens     admitted        saved   ratio
+digest        1       17,590        4,217       13,373    4.2x
+run           1            7            7            0    1.0x
+TOTAL         2       17,597        4,224       13,373    4.2x
+```
+
+Interpretation: in this single paired run, CTX reduced visible session spend
+from 3 percentage points to 2 percentage points, roughly one third lower. This
+is a practical signal, not a statistical claim: the UI meter is rounded, prompt
+cache and reasoning tokens are not exposed, and one run cannot establish a
+general average. If the same ratio holds across repeated similar tasks, it would
+be equivalent to roughly 1.5x more work per visible session-limit budget.
+
+See `docs/claude-code-ab-benchmark.md` for the detailed run notes.
 
 Example from the project where this toolkit was developed:
 
@@ -154,7 +232,7 @@ ctx map                          # see what is expensive to read first
 ctx run -- npm test              # filter a noisy command; full log saved locally
 rlm --query "<question>"         # answer over a huge context, not your window
 ctx memory query "<question>"    # ask durable project memory
-ctx report                       # measured token savings (never estimated)
+ctx report                       # admitted-vs-raw context reduction report
 ```
 
 ## Normal Usage
@@ -195,7 +273,10 @@ ctx memory query "how does progress persistence work?" --scope project
 # Validate links, size limits, journals, and protected rules
 ctx memory check
 
-# Show measured savings
+# Show the full unsqueezed baseline for a file or project
+ctx rawcount .
+
+# Show measured context reduction
 ctx report
 ```
 

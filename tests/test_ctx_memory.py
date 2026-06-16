@@ -196,6 +196,21 @@ class MemoryTests(unittest.TestCase):
         gemini_creds_path.return_value = mock.Mock(is_file=lambda: False)
         self.assertEqual(rlm.pick_provider("auto"), "openai-oauth")
 
+    def test_rawcount_counts_directory_without_ledger(self):
+        (self.root / "src").mkdir()
+        (self.root / "src" / "app.ts").write_text("export const app = 1;\n", encoding="utf-8")
+        (self.root / ".env").write_text("SECRET=value\n", encoding="utf-8")
+        args = argparse.Namespace(path=str(self.root), include_secrets=False, json=False)
+
+        with contextlib.redirect_stdout(io.StringIO()) as stdout:
+            self.assertEqual(ctx.cmd_rawcount(args), 0)
+
+        output = stdout.getvalue()
+        self.assertIn("# raw context:", output)
+        self.assertIn("files: 1", output)
+        self.assertIn("secret-looking files skipped: 1", output)
+        self.assertFalse((self.root / ".ctx" / "ledger.jsonl").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

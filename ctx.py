@@ -9,6 +9,7 @@ Subcommands:
   digest <file>       structural digest of a file instead of a full read
   run -- <command>    run a noisy command, print only the salient extract; full log saved
   count <file|->      token count of a file or stdin (exact via API if key present)
+  rawcount <path|->   token count of unsqueezed text with no compression or ledger savings
 """
 
 from __future__ import annotations
@@ -422,6 +423,57 @@ def cmd_count(args: argparse.Namespace) -> int:
         label = str(p)
     tok, method = exact_tokens(text)
     print(f"{label}: {tok:,} tokens ({method}), {len(text):,} chars")
+    return 0
+
+
+def cmd_rawcount(args: argparse.Namespace) -> int:
+    """Report the full unsqueezed context size for a file, directory, or stdin.
+
+    Unlike digest/run/rlm this does not compress, summarize, send content to an
+    LLM, or write savings records. It is a baseline meter for A/B comparisons.
+    """
+    skipped_secrets: list[str] = []
+    if args.path == "-":
+        text = sys.stdin.read()
+        label = "<stdin>"
+        files = 1
+    else:
+        p = Path(args.path)
+        label = str(p)
+        if p.is_dir():
+            text, files, skipped_secrets = collect_context(
+                p, include_secrets=args.include_secrets)
+        elif p.is_file():
+            text = read_text(p)
+            files = 1
+        else:
+            sys.stderr.write(f"[ctx] not a file or directory: {p}\n")
+            return 2
+
+    tokens = est_tokens(text)
+    result = {
+        "path": label,
+        "files": files,
+        "chars": len(text),
+        "tokens": tokens,
+        "method": "heuristic(chars/3.5)",
+        "compression": "none",
+        "ledger": "not written",
+        "skipped_secret_files": skipped_secrets,
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    print(f"# raw context: {label}")
+    print("# compression: none; ledger: not written")
+    print(f"files: {files:,}")
+    print(f"chars: {len(text):,}")
+    print(f"tokens: ~{tokens:,} ({result['method']})")
+    if skipped_secrets:
+        print(f"secret-looking files skipped: {len(skipped_secrets):,} "
+              f"(e.g. {', '.join(skipped_secrets[:3])}); "
+              "use --include-secrets to count them")
     return 0
 
 
@@ -872,14 +924,14 @@ def collect_context(root: Path, include_secrets: bool = False) -> tuple[int, int
         for name in sorted(filenames):
             p = Path(dirpath) / name
             rel = p.relative_to(root).as_posix()
+            if not include_secrets and _looks_secret(name):
+                skipped_secrets.append(rel)
+                continue
             if name.startswith("."):
                 continue
             if name in SKIP_FILES or rel in SKIP_FILES:
                 continue
             if p.suffix.lower() in BINARY_EXT:
-                continue
-            if not include_secrets and _looks_secret(name):
-                skipped_secrets.append(rel)
                 continue
             try:
                 text = read_text(p)
@@ -1053,6 +1105,15 @@ def main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("count", help="token count of a file or stdin (-)")
     c.add_argument("file")
     c.set_defaults(fn=cmd_count)
+
+    rc = sub.add_parser(
+        "rawcount",
+        help="token count of unsqueezed text with no compression or ledger savings")
+    rc.add_argument("path", help="file, directory, or - for stdin")
+    rc.add_argument("--include-secrets", action="store_true",
+                    help="when scanning a directory, include .env/keys/secrets")
+    rc.add_argument("--json", action="store_true", help="emit machine-readable metrics")
+    rc.set_defaults(fn=cmd_rawcount)
 
     mem = sub.add_parser("memory", help="manage the project memory vault")
     mem_sub = mem.add_subparsers(dest="memory_cmd", required=True)
