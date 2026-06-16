@@ -468,6 +468,39 @@ def _openai_provider(model: str, sub_model: str) -> Provider:
     return Provider(root=call(model), sub=call(sub_model))
 
 
+def _openrouter_provider(model: str, sub_model: str) -> Provider:
+    """OpenRouter chat completions via its OpenAI-compatible endpoint."""
+    key = os.environ.get("OPENROUTER_API_KEY")
+    if not key:
+        raise RuntimeError("provider 'openrouter' needs OPENROUTER_API_KEY")
+    if not model:
+        raise RuntimeError(
+            "provider 'openrouter' needs --model, e.g. "
+            "--model deepseek/deepseek-chat-v3.1")
+    sub_model = sub_model or model
+    base = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+    headers = {"Authorization": f"Bearer {key}"}
+    if os.environ.get("OPENROUTER_HTTP_REFERER"):
+        headers["HTTP-Referer"] = os.environ["OPENROUTER_HTTP_REFERER"]
+    if os.environ.get("OPENROUTER_APP_TITLE"):
+        headers["X-Title"] = os.environ["OPENROUTER_APP_TITLE"]
+
+    def call(mdl: str) -> LLMFn:
+        def inner(prompt: str) -> str:
+            data = _http_json(
+                f"{base}/chat/completions",
+                {
+                    "model": mdl,
+                    "messages": [{"role": "user", "content": prompt or " "}],
+                    "max_tokens": 1024,
+                },
+                headers)
+            return data["choices"][0]["message"]["content"]
+        return inner
+
+    return Provider(root=call(model), sub=call(sub_model))
+
+
 # ---------------------------------------- Gemini subscription (OAuth) ----
 # Uses caller-supplied Google OAuth application credentials. The toolkit does not
 # embed third-party client credentials. Prefer `gemini-cli` unless you operate
@@ -840,6 +873,7 @@ DEFAULT_MODELS = {
     "gemini-oauth": ("gemini-2.5-pro", "gemini-2.5-flash"),
     "gemini-cli": ("gemini-2.5-pro", "gemini-2.5-flash"),
     "openai": ("gpt-5", "gpt-5-mini"),
+    "openrouter": ("", ""),
     "codex": ("gpt-5.4-mini", "gpt-5.4-mini"),         # cheap; override with --model
     "openai-oauth": ("gpt-5.4-mini", "gpt-5.4-mini"),  # cheap; override with --model
     "fake": ("fake", "fake"),
@@ -851,6 +885,7 @@ _BUILDERS = {
     "gemini-oauth": _gemini_oauth_provider,
     "gemini-cli": _gemini_cli_provider,
     "openai": _openai_provider,
+    "openrouter": _openrouter_provider,
     "codex": _codex_cli_provider,
     "openai-oauth": _openai_oauth_provider,
 }
@@ -881,6 +916,8 @@ def pick_provider(name: str) -> str:
         return "gemini"
     if os.environ.get("OPENAI_API_KEY"):
         return "openai"
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return "openrouter"
     if gemini_creds_path().is_file():          # Gemini subscription (OAuth) login
         return "gemini-oauth"
     if shutil.which("gemini"):                 # Google's own CLI (subscription)
@@ -893,6 +930,7 @@ def pick_provider(name: str) -> str:
         return "cli"
     raise RuntimeError(
         "no backend found. Set ANTHROPIC_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY "
+        "/ OPENROUTER_API_KEY "
         "(a .env in this folder works), or log in by subscription "
         "(`python ctx.py gemini-login`, or the `claude`/`gemini` CLI), "
         "or pass --provider fake for an offline demo.")
@@ -918,19 +956,24 @@ def resolve_provider(name: str, model: Optional[str] = None,
 
 def rlm_query(context: str, query: str, provider: Provider,
               cfg: Optional[RLMConfig] = None,
-              graph: Optional[Graph] = None) -> RLMResult:
+              graph: Optional[Graph] = None,
+              provider_name: Optional[str] = None,
+              model: Optional[str] = None) -> RLMResult:
     """Run an RLM query over `context`. The root never receives `context` directly."""
     cfg = cfg or RLMConfig()
     rc, sc = _Counter(), _Counter()
     root = rc.wrap(provider.root)
     sub = sc.wrap(provider.sub)
     traj: list = []
+    t0 = time.monotonic()
     if cfg.mode == "repl":
         answer = _repl_solve(context, query, root, sub, cfg, graph, traj)
     else:
         answer = _solve(context, query, root, sub, cfg, 0, traj)
     ctx_tok, ans_tok = est_tokens(context), est_tokens(answer)
-    ledger_log("rlm", ctx_tok, ans_tok, f"{cfg.mode}:{query[:60]}")
+    ledger_log("rlm", ctx_tok, ans_tok, f"{cfg.mode}:{query[:60]}",
+               provider=provider_name, model=model, calls=rc.n + sc.n,
+               duration_ms=int((time.monotonic() - t0) * 1000))
     return RLMResult(answer=answer, calls=rc.n + sc.n,
                      context_tokens=ctx_tok, answer_tokens=ans_tok,
                      trajectory=traj)
@@ -979,7 +1022,8 @@ def run_official(context: str, query: str, provider: str, model: Optional[str],
     result = rlm_obj.completion(f"{query}\n\n--- CONTEXT ---\n{context}")
     answer = getattr(result, "response", str(result))
     ctx_tok, ans_tok = est_tokens(context), est_tokens(answer)
-    ledger_log("rlm", ctx_tok, ans_tok, f"official:{query[:60]}")
+    ledger_log("rlm", ctx_tok, ans_tok, f"official:{query[:60]}",
+               provider=concrete, model=mdl, calls=0)
     return RLMResult(answer=answer, calls=0, context_tokens=ctx_tok,
                      answer_tokens=ans_tok, trajectory=[{"engine": "official",
                                                          "backend": backend, "model": mdl}])

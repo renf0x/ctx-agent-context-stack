@@ -2,6 +2,22 @@
 
 ## Now
 
+- Rewrote agent instructions around a context-saving ladder (memory -> CodeGraph
+  -> map -> digest -> read -> run -> RLM). RLM is now optional (only with a
+  configured model); CodeGraph + Obsidian memory framed as everyday savings.
+  Files: `templates/AGENT_CONTEXT.md`, `templates/adapters/{CLAUDE,AGENTS}.md`,
+  `README.md`.
+- Broadened and enriched ledger logging:
+  - `map` and `memory context` now write ledger records (were invisible before).
+  - `rlm` records carry provider/model/sub-LM calls/duration.
+  - New `ctx read <file>` funnel logs uncompressed pulls as the savings
+    denominator (`op:"read"`, raw == kept).
+  - `ctx report` shows an honest saved-% over content pulls only (recon `map`
+    excluded), a coverage line, and a per-provider rlm breakdown. Schema tagged
+    `v: 2`; additive and backward compatible. Covered by new `LedgerTests`.
+  - New `ctx hook` (silent PostToolUse hook, JSON on stdin) logs direct
+    `Read`/`Bash` pulls as `op:"direct"`, so coverage reflects context that
+    bypasses ctx. Opt-in via settings.json (see below); not yet wired by default.
 - Added `ctx rawcount <path|->` as the no-compression baseline token meter.
 - Created `C:\Users\renf\Desktop\TravelAgent-noctx` as a copy of `TravelAgent`
   without ctx/RLM/CodeGraph/memory tooling instructions or files.
@@ -9,6 +25,8 @@
   `C:\Users\renf\Desktop\TravelAgent`.
 - Created `C:\Users\renf\Desktop\ctx-benchmark-lab` with `with-ctx` and
   `without-ctx` fixture projects plus prompts for fresh-session benchmarking.
+- Added explicit OpenRouter provider support: `--provider openrouter --model
+  <openrouter-model-slug>` with `OPENROUTER_API_KEY`.
 
 ## Next
 
@@ -72,6 +90,12 @@
 - Created `ctx-benchmark-lab` on the Desktop. It contains a copy of this ctx
   repository, a `with-ctx` synthetic weather task with strict digest/run rules,
   a matching `without-ctx` control, and prompt files for both runs.
+
+### 2026-06-16 OpenRouter provider support
+
+- Added `--provider openrouter` for RLM calls.
+- OpenRouter requires `OPENROUTER_API_KEY` and an explicit `--model` slug.
+- If `--sub-model` is omitted, OpenRouter reuses `--model` for sub-LM calls.
 
 ### 2026-06-16 Token/memory audit
 

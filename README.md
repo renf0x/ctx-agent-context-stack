@@ -21,7 +21,7 @@ OpenCode, and other agents that can read project files or run shell commands.
 | **CTX run** | Filters long test/build logs and saves the full output locally |
 | **CTX rawcount** | Measures the unsqueezed baseline context size with no compression |
 | **TVL ledger** | Measures admitted and avoided tokens instead of guessing savings |
-| **RLM** | Delegates questions over large contexts to recursive sub-agent calls |
+| **RLM** *(optional)* | Delegates questions over large contexts to recursive sub-agent calls — only when an RLM model is configured |
 | **CodeGraph** | Retrieves symbols, dependencies, and affected tests |
 | **Durable memory** | Stores stable knowledge in Markdown/Obsidian outside chat history |
 | **Universal handoff** | Transfers tasks and verified state between different agents |
@@ -249,6 +249,13 @@ command.** Both share the same `.ctx/ledger.jsonl` log and behave identically.
 The user should not need to type these commands for every task. Installed agent
 instructions tell supported agents to use the protocol automatically.
 
+**The context-saving ladder** (climb from cheap to expensive, stop at the first
+rung that answers the task): memory → CodeGraph (`codegraph context`) → `ctx map`
+→ `ctx digest` → `ctx read` (funnelled full read) → `ctx run` for commands →
+**RLM only if a model is configured**. RLM is optional: with no dedicated model
+set up, skip it and stay on digest/map. Durable findings go into the Obsidian
+memory vault so the next session does not re-read them.
+
 Manual commands are useful for diagnostics:
 
 ```powershell
@@ -260,6 +267,10 @@ ctx digest src/large-file.ts
 
 # Filter noisy output while retaining the complete local log
 ctx run -- npm test
+
+# Read a whole file when you truly need it -- logged as an uncompressed pull so
+# the savings report's percentage reflects ALL context, not just the wins
+ctx read src/config.json
 
 # Build a small task context
 ctx memory context "fix progress persistence"
@@ -282,6 +293,11 @@ ctx report
 
 ## RLM Sub-Agent Options
 
+> **RLM is optional.** It is the last rung of the ladder and only pays off when a
+> question spans more content than is reasonable to digest *and* you have an RLM
+> provider/model configured. If no dedicated RLM model is set up, skip it — the
+> deterministic tools (map/digest/read/run) and CodeGraph cover everyday work.
+
 RLM processes large context in chunks with multiple sub-model calls and returns
 only a short synthesized answer to the main agent.
 
@@ -293,6 +309,7 @@ Available providers:
 | **OpenAI OAuth** | `--provider openai-oauth` | Existing Codex/ChatGPT subscription login |
 | **Codex CLI** | `--provider codex` | `codex exec` child processes |
 | **OpenAI API** | `--provider openai` | `OPENAI_API_KEY` |
+| **OpenRouter API** | `--provider openrouter --model <slug>` | `OPENROUTER_API_KEY`; model slug is required |
 | **Claude CLI** | `--provider cli` | Existing Claude CLI subscription login |
 | **Anthropic API** | `--provider api` | `ANTHROPIC_API_KEY` |
 | **Gemini OAuth** | `--provider gemini-oauth` | Your own Google OAuth client credentials |
@@ -310,6 +327,11 @@ ctx memory query "describe the architecture" --scope project `
 # Reuse Claude CLI
 ctx memory query "find risky architectural coupling" --scope project `
   --provider cli
+
+# Use a specific OpenRouter model slug
+ctx memory query "describe the architecture" --scope project `
+  --provider openrouter `
+  --model deepseek/deepseek-chat-v3.1
 
 # Gemini subscription through Google's official CLI
 ctx memory query "summarize previous investigations" `

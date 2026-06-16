@@ -1,6 +1,7 @@
 import argparse
 import contextlib
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -196,6 +197,57 @@ class MemoryTests(unittest.TestCase):
         gemini_creds_path.return_value = mock.Mock(is_file=lambda: False)
         self.assertEqual(rlm.pick_provider("auto"), "openai-oauth")
 
+    @mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "or-key"}, clear=True)
+    @mock.patch("rlm.shutil.which", return_value=None)
+    @mock.patch("rlm.gemini_creds_path")
+    @mock.patch("rlm.codex_auth_path")
+    def test_provider_auto_detects_openrouter(
+        self, codex_auth_path, gemini_creds_path, which
+    ):
+        codex_auth_path.return_value = mock.Mock(is_file=lambda: False)
+        gemini_creds_path.return_value = mock.Mock(is_file=lambda: False)
+        self.assertEqual(rlm.pick_provider("auto"), "openrouter")
+
+    @mock.patch.dict(os.environ, {
+        "OPENROUTER_API_KEY": "or-key",
+        "OPENROUTER_APP_TITLE": "ctx-test",
+    }, clear=True)
+    @mock.patch("rlm._http_json")
+    def test_openrouter_provider_sends_selected_model(self, http_json):
+        http_json.return_value = {
+            "choices": [{"message": {"content": "answer"}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+        }
+
+        provider = rlm.resolve_provider(
+            "openrouter",
+            model="deepseek/deepseek-chat-v3.1",
+            sub_model="deepseek/deepseek-chat-v3.1",
+        )
+        self.assertEqual(provider.root("question"), "answer")
+
+        url, payload, headers = http_json.call_args.args
+        self.assertEqual(url, "https://openrouter.ai/api/v1/chat/completions")
+        self.assertEqual(payload["model"], "deepseek/deepseek-chat-v3.1")
+        self.assertEqual(payload["messages"][0]["content"], "question")
+        self.assertEqual(headers["Authorization"], "Bearer or-key")
+        self.assertEqual(headers["X-Title"], "ctx-test")
+
+    @mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "or-key"}, clear=True)
+    @mock.patch("rlm._http_json")
+    def test_openrouter_sub_model_defaults_to_selected_model(self, http_json):
+        http_json.return_value = {"choices": [{"message": {"content": "answer"}}]}
+
+        provider = rlm.resolve_provider(
+            "openrouter",
+            model="deepseek/deepseek-chat-v3.1",
+            sub_model=None,
+        )
+        self.assertEqual(provider.sub("chunk"), "answer")
+
+        payload = http_json.call_args.args[1]
+        self.assertEqual(payload["model"], "deepseek/deepseek-chat-v3.1")
+
     def test_rawcount_counts_directory_without_ledger(self):
         (self.root / "src").mkdir()
         (self.root / "src" / "app.ts").write_text("export const app = 1;\n", encoding="utf-8")
@@ -210,6 +262,91 @@ class MemoryTests(unittest.TestCase):
         self.assertIn("files: 1", output)
         self.assertIn("secret-looking files skipped: 1", output)
         self.assertFalse((self.root / ".ctx" / "ledger.jsonl").exists())
+
+
+class LedgerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self._cwd = os.getcwd()
+        os.chdir(self.root)  # ledger is written to a cwd-relative .ctx
+
+    def tearDown(self):
+        os.chdir(self._cwd)
+        self.temp.cleanup()
+
+    def ledger_records(self):
+        path = self.root / ".ctx" / "ledger.jsonl"
+        if not path.is_file():
+            return []
+        return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines()]
+
+    def test_read_logs_uncompressed_pull(self):
+        (self.root / "f.txt").write_text("hello world\n", encoding="utf-8")
+        args = argparse.Namespace(file="f.txt")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ctx.cmd_read(args), 0)
+        self.assertIn("hello world", out.getvalue())
+        recs = self.ledger_records()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["op"], "read")
+        # a raw read has no saving: it is the honest denominator
+        self.assertEqual(recs[0]["raw_tokens"], recs[0]["kept_tokens"])
+        self.assertEqual(recs[0]["saved_tokens"], 0)
+
+    def test_map_logs_recon_record(self):
+        (self.root / "a.py").write_text("def a():\n    pass\n", encoding="utf-8")
+        args = argparse.Namespace(path=".", top=40, all=False, warn=4000)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ctx.cmd_map(args), 0)
+        ops = [r["op"] for r in self.ledger_records()]
+        self.assertIn("map", ops)
+
+    def test_ledger_log_keeps_extra_fields_and_drops_none(self):
+        ctx.ledger_log("rlm", 100, 10, "q", provider="fake", model=None, calls=3)
+        rec = self.ledger_records()[0]
+        self.assertEqual(rec["provider"], "fake")
+        self.assertEqual(rec["calls"], 3)
+        self.assertNotIn("model", rec)  # None extras are dropped
+        self.assertEqual(rec["v"], 2)
+
+    def test_hook_logs_direct_pull_from_stdin(self):
+        payload = {
+            "session_id": "abc",
+            "tool_name": "Read",
+            "tool_response": {"file": {"content": "x " * 500}},
+        }
+        args = argparse.Namespace(min_tokens=10)
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
+            self.assertEqual(ctx.cmd_hook(args), 0)
+        recs = self.ledger_records()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["op"], "direct")
+        self.assertEqual(recs[0]["raw_tokens"], recs[0]["kept_tokens"])
+        self.assertEqual(recs[0]["session"], "abc")
+
+    def test_hook_is_silent_on_garbage_and_below_threshold(self):
+        with mock.patch("sys.stdin", io.StringIO("not json")):
+            self.assertEqual(ctx.cmd_hook(argparse.Namespace(min_tokens=10)), 0)
+        tiny = {"tool_name": "Read", "tool_response": "hi"}
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(tiny))):
+            self.assertEqual(ctx.cmd_hook(argparse.Namespace(min_tokens=200)), 0)
+        self.assertEqual(self.ledger_records(), [])  # nothing logged either way
+
+    def test_report_excludes_recon_and_reports_coverage(self):
+        ctx.ledger_log("read", 100, 100, "f.txt")          # raw pull
+        ctx.ledger_log("digest", 100, 20, "f.py")           # compressed pull
+        ctx.ledger_log("map", 50000, 80, "/repo")           # recon, must not inflate %
+        ctx.ledger_log("rlm", 4000, 40, "mapreduce:q", provider="gemini", calls=5)
+        args = argparse.Namespace(price=5.0, reset=False)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ctx.cmd_report(args), 0)
+        text = out.getvalue()
+        self.assertIn("recon ops excluded", text)
+        self.assertIn("coverage:", text)
+        # content saved = (100+100+4000) - (100+20+40) = 4040 of 4200 -> 96%, NOT 99%+
+        self.assertIn("96%", text)
+        self.assertIn("gemini", text)  # provider breakdown present
 
 
 if __name__ == "__main__":

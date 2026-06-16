@@ -238,15 +238,32 @@ def read_text(path: Path) -> str:
 LEDGER_PATH = Path(".ctx") / "ledger.jsonl"
 
 
-def ledger_log(op: str, raw_tok: int, kept_tok: int, detail: str) -> None:
+# Ops that pull full, uncompressed content into the agent's context. They are
+# the denominator for the honest savings percentage: every token a `read`
+# admits is context that ctx did NOT compress, so it dilutes the headline ratio
+# instead of being silently excluded like a direct Read would be.
+RAW_OPS = frozenset({"read", "direct"})
+
+# Orientation ops whose "raw" side is a hypothetical read-everything cost rather
+# than a real 1:1 content substitution. They stay in the per-op table for
+# visibility but are kept out of the headline savings % so it cannot be inflated
+# by a denominator the agent would never actually have paid.
+RECON_OPS = frozenset({"map"})
+
+
+def ledger_log(op: str, raw_tok: int, kept_tok: int, detail: str,
+               **extra: object) -> None:
     """Append a savings record to the ledger.
 
     Written exclusively by this tool (deterministic code) — the model never
     computes or edits these numbers, so `ctx.py report` measures the effect
-    independently of the agent's own claims."""
+    independently of the agent's own claims. `extra` carries optional, schema-v2
+    fields (provider/model/calls/path/exit_code); None values are dropped so old
+    readers and aggregates keep working."""
     try:
         LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
-        rec = {
+        rec: dict[str, object] = {
+            "v": 2,
             "ts": datetime.datetime.now().isoformat(timespec="seconds"),
             "op": op,
             "raw_tokens": raw_tok,
@@ -254,6 +271,7 @@ def ledger_log(op: str, raw_tok: int, kept_tok: int, detail: str) -> None:
             "saved_tokens": max(0, raw_tok - kept_tok),
             "detail": detail,
         }
+        rec.update({k: v for k, v in extra.items() if v is not None})
         with LEDGER_PATH.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except OSError as exc:
@@ -288,18 +306,24 @@ def cmd_map(args: argparse.Namespace) -> int:
             rows.append((tok, text.count("\n") + 1, str(p.relative_to(root))))
 
     rows.sort(reverse=True)
-    budget_note = ""
-    print(f"# repo map: {root}")
-    print(f"# files: {len(rows)} (skipped {skipped} binary/unreadable), "
-          f"~{total_tokens:,} tokens total to read everything")
-    print(f"{'~tokens':>9}  {'lines':>6}  path")
+    out: list[str] = []
+    out.append(f"# repo map: {root}")
+    out.append(f"# files: {len(rows)} (skipped {skipped} binary/unreadable), "
+               f"~{total_tokens:,} tokens total to read everything")
+    out.append(f"{'~tokens':>9}  {'lines':>6}  path")
     shown = rows if args.all else rows[: args.top]
     for tok, lines, rel in shown:
         flag = "  <- EXPENSIVE, prefer `ctx.py digest`" if tok >= args.warn else ""
-        print(f"{tok:>9,}  {lines:>6}  {rel}{flag}")
+        out.append(f"{tok:>9,}  {lines:>6}  {rel}{flag}")
     if not args.all and len(rows) > args.top:
         rest = sum(t for t, _, _ in rows[args.top:])
-        print(f"      ...   {len(rows) - args.top} more files, ~{rest:,} tokens (use --all)")
+        out.append(f"      ...   {len(rows) - args.top} more files, ~{rest:,} tokens (use --all)")
+    rendered = "\n".join(out)
+    # Orienting via the map costs the printed listing instead of reading every
+    # file; log that gap so recon shows up in the savings report too.
+    ledger_log("map", total_tokens, est_tokens(rendered), str(root),
+               files=len(rows))
+    print(rendered)
     return 0
 
 
@@ -423,6 +447,81 @@ def cmd_count(args: argparse.Namespace) -> int:
         label = str(p)
     tok, method = exact_tokens(text)
     print(f"{label}: {tok:,} tokens ({method}), {len(text):,} chars")
+    return 0
+
+
+def cmd_read(args: argparse.Namespace) -> int:
+    """Print a file verbatim and record it as uncompressed context pulled in.
+
+    Use this instead of a plain editor read when you genuinely need the whole
+    file: it gives the agent the same bytes, but logs the pull so `ctx report`
+    can show what fraction of context actually went through a compressor versus
+    being admitted raw. Raw reads have no saving — they are the honest
+    denominator of the savings percentage."""
+    p = Path(args.file)
+    if not p.is_file():
+        sys.stderr.write(f"[ctx] not a file: {p}\n")
+        return 2
+    text = read_text(p)
+    tok = est_tokens(text)
+    ledger_log("read", tok, tok, str(p))
+    sys.stdout.write(text)
+    if text and not text.endswith("\n"):
+        sys.stdout.write("\n")
+    print(f"# read {p} verbatim -- ~{tok:,} tokens admitted uncompressed "
+          f"(prefer `ctx.py digest` for structure or `rlm` for an answer)")
+    return 0
+
+
+def _hook_tokens_and_label(event: dict) -> tuple[int, str]:
+    """Estimate the context tokens an agent tool call admitted, plus a label.
+
+    Reads the Claude Code PostToolUse payload. We count the tool RESPONSE (what
+    actually entered the agent's context), falling back to the read target's
+    size. Returns (0, ...) when there is nothing to charge."""
+    tool = str(event.get("tool_name", "") or "")
+    resp = event.get("tool_response")
+    text = ""
+    if isinstance(resp, str):
+        text = resp
+    elif isinstance(resp, dict):
+        # Read returns {"file": {"content": ...}}; Bash returns stdout/stderr.
+        for key in ("content", "stdout", "output", "stderr"):
+            val = resp.get(key)
+            if isinstance(val, str):
+                text += val
+        if not text:
+            inner = resp.get("file")
+            if isinstance(inner, dict) and isinstance(inner.get("content"), str):
+                text = inner["content"]
+    if not text:
+        # Pre-run or content-less event: fall back to the file being read.
+        fp = (event.get("tool_input") or {}).get("file_path")
+        if isinstance(fp, str) and Path(fp).is_file():
+            try:
+                text = read_text(Path(fp))
+            except OSError:
+                text = ""
+    return est_tokens(text), tool or "tool"
+
+
+def cmd_hook(args: argparse.Namespace) -> int:
+    """Passively record context pulled by a direct agent tool call (Read/Bash).
+
+    Wire this as a Claude Code PostToolUse hook so reads that bypass ctx still
+    land in the savings denominator -- otherwise `ctx report` coverage only
+    reflects pulls the agent voluntarily routed through `ctx read`. Always exits
+    0 and prints nothing: a hook must never break or slow the agent loop."""
+    try:
+        event = json.loads(sys.stdin.read() or "{}")
+        if not isinstance(event, dict):
+            return 0
+        tok, label = _hook_tokens_and_label(event)
+        if tok >= args.min_tokens:
+            ledger_log("direct", tok, tok, f"{label} (bypassed ctx)",
+                       session=event.get("session_id"))
+    except Exception:  # a hook must be silent and harmless on any malformed input
+        pass
     return 0
 
 
@@ -656,11 +755,33 @@ def _memory_context(root: Path, task: str, max_nodes: int, max_code: int) -> str
     return "\n\n".join(parts).strip() + "\n"
 
 
+def _memory_vault_tokens(root: Path) -> int:
+    """Token cost of reading the whole memory vault + handoff at session start —
+    the corpus a focused `memory context` is meant to stand in for."""
+    total = 0
+    memory = root / "memory"
+    if memory.is_dir():
+        for note in memory.rglob("*.md"):
+            try:
+                total += est_tokens(read_text(note))
+            except OSError:
+                continue
+    handoff = root / "handoff.md"
+    if handoff.is_file():
+        total += est_tokens(read_text(handoff))
+    return total
+
+
 def cmd_memory_context(args: argparse.Namespace) -> int:
     root = _project_root(args.path)
     text = _memory_context(root, args.task, args.max_nodes, args.max_code)
+    kept = est_tokens(text)
+    # Conservative denominator: the memory vault, not the whole repo — distilling
+    # a task context beats re-reading every note at session start.
+    ledger_log("mem-context", max(_memory_vault_tokens(root), kept), kept,
+               args.task[:60])
     print(text, end="")
-    print(f"\n# memory context: ~{est_tokens(text):,} estimated tokens")
+    print(f"\n# memory context: ~{kept:,} estimated tokens")
     return 0
 
 
@@ -982,7 +1103,8 @@ def cmd_rlm(args: argparse.Namespace) -> int:
             provider = rlm.resolve_provider(args.provider, args.model, args.sub_model,
                                             fake=fake_fn)
             graph = rlm.Graph.load(args.graph) if args.graph else None
-            result = rlm.rlm_query(context, args.query, provider, cfg, graph)
+            result = rlm.rlm_query(context, args.query, provider, cfg, graph,
+                                   provider_name=resolved, model=args.model)
     except Exception as exc:  # backend/SDK/CLI problems must report cleanly
         sys.stderr.write(f"[ctx] rlm failed: {exc}\n")
         return 1
@@ -1032,36 +1154,75 @@ def cmd_report(args: argparse.Namespace) -> int:
         return 0
 
     by_op: dict[str, dict[str, int]] = {}
+    by_provider: dict[str, dict[str, int]] = {}
     bad = 0
     for line in LEDGER_PATH.read_text(encoding="utf-8").splitlines():
         try:
             rec = json.loads(line)
+            raw, kept = int(rec["raw_tokens"]), int(rec["kept_tokens"])
             agg = by_op.setdefault(rec["op"], {"n": 0, "raw": 0, "kept": 0})
             agg["n"] += 1
-            agg["raw"] += int(rec["raw_tokens"])
-            agg["kept"] += int(rec["kept_tokens"])
+            agg["raw"] += raw
+            agg["kept"] += kept
+            prov = rec.get("provider")
+            if prov:
+                pa = by_provider.setdefault(str(prov),
+                                            {"n": 0, "raw": 0, "kept": 0, "calls": 0})
+                pa["n"] += 1
+                pa["raw"] += raw
+                pa["kept"] += kept
+                pa["calls"] += int(rec.get("calls", 0) or 0)
         except (json.JSONDecodeError, KeyError, ValueError):
             bad += 1
 
     print("# savings report -- computed by ctx.py from .ctx/ledger.jsonl,")
     print("# NOT model-estimated. Heuristic token counts (chars/3.5).")
-    print(f"{'op':<8} {'calls':>6} {'raw tokens':>12} {'admitted':>12} "
+    print(f"{'op':<10} {'calls':>6} {'raw tokens':>12} {'admitted':>12} "
           f"{'saved':>12} {'ratio':>7}")
     tot_raw = tot_kept = 0
     for op in sorted(by_op):
         a = by_op[op]
         tot_raw += a["raw"]
         tot_kept += a["kept"]
-        print(f"{op:<8} {a['n']:>6} {a['raw']:>12,} {a['kept']:>12,} "
+        print(f"{op:<10} {a['n']:>6} {a['raw']:>12,} {a['kept']:>12,} "
               f"{a['raw'] - a['kept']:>12,} {a['raw'] / max(a['kept'], 1):>6.1f}x")
     saved = tot_raw - tot_kept
-    print(f"{'TOTAL':<8} {sum(a['n'] for a in by_op.values()):>6} {tot_raw:>12,} "
+    print(f"{'TOTAL':<10} {sum(a['n'] for a in by_op.values()):>6} {tot_raw:>12,} "
           f"{tot_kept:>12,} {saved:>12,} {tot_raw / max(tot_kept, 1):>6.1f}x")
-    usd = saved / 1e6 * args.price
-    print(f"\n# saved this session: {saved:,} input tokens "
-          f"(~${usd:.2f} at ${args.price}/MTok, single pass).")
-    print("# In an agent loop the real effect is larger: every admitted token")
-    print("# is re-sent on each later turn, so per-turn savings multiply.")
+
+    # Honest savings %: over real content pulls only (recon excluded), of all the
+    # bulk content the agent engaged with, how much ctx kept out of context.
+    # `read` ops (raw == kept) are the denominator of integrity -- they pull
+    # content in full and pull the percentage down, instead of vanishing the way
+    # a direct editor read would.
+    content = {op: a for op, a in by_op.items() if op not in RECON_OPS}
+    c_raw = sum(a["raw"] for a in content.values())
+    c_kept = sum(a["kept"] for a in content.values())
+    c_saved = c_raw - c_kept
+    pct = 100.0 * c_saved / max(c_raw, 1)
+    raw_via_compressor = sum(a["raw"] for op, a in content.items() if op not in RAW_OPS)
+    raw_via_read = sum(a["raw"] for op, a in content.items() if op in RAW_OPS)
+    engaged = raw_via_compressor + raw_via_read
+    coverage = 100.0 * raw_via_compressor / max(engaged, 1)
+    recon_note = " (recon ops excluded)" if len(content) != len(by_op) else ""
+    print(f"\n# saved {c_saved:,} of {c_raw:,} would-be content tokens = {pct:.0f}% "
+          f"kept out of context{recon_note}, single pass.")
+    if raw_via_read:
+        print(f"# coverage: {coverage:.0f}% of engaged content ({raw_via_compressor:,} of "
+              f"{engaged:,} tok) went through a ctx compressor; the rest was read raw.")
+    else:
+        print("# coverage: no `ctx read` pulls logged yet -- route full-file reads")
+        print("#           through `ctx read` so the % reflects ALL content, not just wins.")
+    usd = c_saved / 1e6 * args.price
+    print(f"# dollar value: ~${usd:.2f} at ${args.price}/MTok. In an agent loop the real")
+    print("# effect is larger: every admitted token is re-sent on each later turn.")
+
+    if by_provider:
+        print(f"\n{'rlm provider':<16} {'calls':>6} {'sub-LM':>7} {'context tok':>12} "
+              f"{'answer tok':>11}")
+        for prov in sorted(by_provider):
+            p = by_provider[prov]
+            print(f"{prov:<16} {p['n']:>6} {p['calls']:>7} {p['raw']:>12,} {p['kept']:>11,}")
     if bad:
         print(f"# warning: {bad} malformed ledger line(s) skipped")
     return 0
@@ -1106,6 +1267,19 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("file")
     c.set_defaults(fn=cmd_count)
 
+    rd = sub.add_parser(
+        "read",
+        help="print a file verbatim and log it as uncompressed context (savings denominator)")
+    rd.add_argument("file")
+    rd.set_defaults(fn=cmd_read)
+
+    hk = sub.add_parser(
+        "hook",
+        help="PostToolUse hook: log context pulled by direct Read/Bash (reads JSON on stdin)")
+    hk.add_argument("--min-tokens", type=int, default=200,
+                    help="ignore tool calls smaller than this (default 200)")
+    hk.set_defaults(fn=cmd_hook)
+
     rc = sub.add_parser(
         "rawcount",
         help="token count of unsqueezed text with no compression or ledger savings")
@@ -1141,10 +1315,13 @@ def main(argv: list[str] | None = None) -> int:
     mem_query.add_argument("--scope", choices=["memory", "project"], default="memory")
     mem_query.add_argument("--provider",
                            choices=["auto", "api", "cli", "gemini", "gemini-oauth",
-                                    "gemini-cli", "openai", "codex", "openai-oauth", "fake"],
+                                    "gemini-cli", "openai", "openrouter",
+                                    "codex", "openai-oauth", "fake"],
                            default="auto")
-    mem_query.add_argument("--model", default=None)
-    mem_query.add_argument("--sub-model", default=None)
+    mem_query.add_argument("--model", default=None,
+                           help="root model; required for --provider openrouter")
+    mem_query.add_argument("--sub-model", default=None,
+                           help="sub-LM model; defaults to --model for openrouter")
     mem_query.add_argument("--mode", choices=["mapreduce", "repl"], default="mapreduce")
     mem_query.add_argument("--chunk-tokens", type=int, default=4000)
     mem_query.add_argument("--max-depth", type=int, default=1)
@@ -1177,12 +1354,15 @@ def main(argv: list[str] | None = None) -> int:
                     help="ours=built-in engine; official=delegate to `pip install rlms`")
     rl.add_argument("--provider",
                     choices=["auto", "api", "cli", "gemini", "gemini-oauth",
-                             "gemini-cli", "openai", "codex", "openai-oauth", "fake"],
+                             "gemini-cli", "openai", "openrouter",
+                             "codex", "openai-oauth", "fake"],
                     default="auto",
                     help="auto-detects from API keys / .env / subscription logins "
                          "(gemini-oauth, gemini-cli, claude cli)")
-    rl.add_argument("--model", default=None, help="root model (default: per-provider)")
-    rl.add_argument("--sub-model", default=None, help="cheap sub-LM model (default: per-provider)")
+    rl.add_argument("--model", default=None,
+                    help="root model (required for --provider openrouter; otherwise default per-provider)")
+    rl.add_argument("--sub-model", default=None,
+                    help="cheap sub-LM model (defaults to --model for openrouter; otherwise default per-provider)")
     rl.add_argument("--chunk-tokens", type=int, default=4000)
     rl.add_argument("--max-depth", type=int, default=1)
     rl.add_argument("--no-prefilter", action="store_true",
