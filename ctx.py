@@ -478,7 +478,7 @@ def cmd_read(args: argparse.Namespace) -> int:
 # (digest/run/read/rlm). Counting the Bash tool_response on top would double-count
 # the same content as a raw "direct" pull, so the hook skips these.
 _CTX_SELFCALL_RE = re.compile(
-    r"(^|[|&;]\s*)(ctx|rlm)\b|(^|[|&;]\s*)(python\d?|py)\s+\S*(ctx|rlm)\.py\b")
+    r"(^|[|&;(\n]\s*)(ctx|rlm)\b|(^|[|&;(\n]\s*)(python\d?|py)\s+\S*(ctx|rlm)\.py\b")
 
 
 def _is_ctx_selfcall(command: str) -> bool:
@@ -783,6 +783,10 @@ def _memory_vault_tokens(root: Path) -> int:
     memory = root / "memory"
     if memory.is_dir():
         for note in memory.rglob("*.md"):
+            # Archived notes are not part of the session-start corpus, so they
+            # must not inflate the denominator (matches memory_check's scope).
+            if "archive" in note.relative_to(memory).parts:
+                continue
             try:
                 total += est_tokens(read_text(note))
             except OSError:
