@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tvl-rlm"
+version = "0.0.3"
+description = "CTX Agent Context Stack: token budgeting, RLM delegation, CodeGraph retrieval, durable memory, and cross-agent handoff for coding agents."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "renf0x" }]
+keywords = ["llm", "agents", "context", "tokens", "rlm", "obsidian", "codegraph"]
+
+# Core is stdlib-only. `anthropic` is used opportunistically for exact token
+# counts / API providers and stays optional.
+dependencies = []
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.39"]
+
+[project.urls]
+Homepage = "https://github.com/renf0x/ctx-agent-context-stack"
+Repository = "https://github.com/renf0x/ctx-agent-context-stack"
+
+# Installs the global `ctx` / `rlm` / `ctx-rlm-login` commands so the toolkit
+# resolves from any folder (matches the usage shown in the README). A local
+# `ctx.py` copy dropped by install.py still takes priority when present.
+[project.scripts]
+ctx = "ctx:main"
+rlm = "ctx:rlm_entry"
+ctx-rlm-login = "ctx:gemini_login_entry"
+
+[tool.setuptools]
+py-modules = ["ctx", "rlm"]
