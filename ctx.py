@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -473,6 +474,17 @@ def cmd_read(args: argparse.Namespace) -> int:
     return 0
 
 
+# A Bash call that itself invokes ctx/rlm already writes its own ledger record
+# (digest/run/read/rlm). Counting the Bash tool_response on top would double-count
+# the same content as a raw "direct" pull, so the hook skips these.
+_CTX_SELFCALL_RE = re.compile(
+    r"(^|[|&;]\s*)(ctx|rlm)\b|(^|[|&;]\s*)(python\d?|py)\s+\S*(ctx|rlm)\.py\b")
+
+
+def _is_ctx_selfcall(command: str) -> bool:
+    return bool(_CTX_SELFCALL_RE.search(command or ""))
+
+
 def _hook_tokens_and_label(event: dict) -> tuple[int, str]:
     """Estimate the context tokens an agent tool call admitted, plus a label.
 
@@ -516,10 +528,19 @@ def cmd_hook(args: argparse.Namespace) -> int:
         event = json.loads(sys.stdin.read() or "{}")
         if not isinstance(event, dict):
             return 0
+        # Skip ctx/rlm's own Bash invocations: those already self-log, so
+        # counting their output here would double-count the same content.
+        if str(event.get("tool_name", "")) == "Bash":
+            cmd = (event.get("tool_input") or {}).get("command", "")
+            if isinstance(cmd, str) and _is_ctx_selfcall(cmd):
+                return 0
         tok, label = _hook_tokens_and_label(event)
         if tok >= args.min_tokens:
+            # tool_use_id lets `report` de-duplicate a tool call that fires the
+            # hook more than once (retries / parallel hook execution).
+            tid = event.get("tool_use_id") or event.get("toolUseID")
             ledger_log("direct", tok, tok, f"{label} (bypassed ctx)",
-                       session=event.get("session_id"))
+                       session=event.get("session_id"), tool_id=tid)
     except Exception:  # a hook must be silent and harmless on any malformed input
         pass
     return 0
@@ -1153,13 +1174,28 @@ def cmd_report(args: argparse.Namespace) -> int:
         print("# ledger is empty: no ctx.py digest/run operations recorded yet")
         return 0
 
+    # Optional settle window: an async PostToolUse hook may still be flushing its
+    # last record when the agent calls report right after a task. Waiting a beat
+    # lets those writes land before we read.
+    if getattr(args, "settle", 0):
+        time.sleep(max(0, args.settle) / 1000.0)
+
     by_op: dict[str, dict[str, int]] = {}
     by_provider: dict[str, dict[str, int]] = {}
-    bad = 0
+    seen_ids: set[str] = set()
+    bad = dup = 0
     for line in LEDGER_PATH.read_text(encoding="utf-8").splitlines():
         try:
             rec = json.loads(line)
             raw, kept = int(rec["raw_tokens"]), int(rec["kept_tokens"])
+            # De-duplicate a single tool call that fired the hook more than once
+            # (retries / parallel hook execution) by its tool_use_id.
+            tid = rec.get("tool_id")
+            if tid:
+                if tid in seen_ids:
+                    dup += 1
+                    continue
+                seen_ids.add(str(tid))
             agg = by_op.setdefault(rec["op"], {"n": 0, "raw": 0, "kept": 0})
             agg["n"] += 1
             agg["raw"] += raw
@@ -1175,47 +1211,62 @@ def cmd_report(args: argparse.Namespace) -> int:
         except (json.JSONDecodeError, KeyError, ValueError):
             bad += 1
 
+    content = {op: a for op, a in by_op.items() if op not in RECON_OPS}
+    recon = {op: a for op, a in by_op.items() if op in RECON_OPS}
+
     print("# savings report -- computed by ctx.py from .ctx/ledger.jsonl,")
     print("# NOT model-estimated. Heuristic token counts (chars/3.5).")
-    print(f"{'op':<10} {'calls':>6} {'raw tokens':>12} {'admitted':>12} "
-          f"{'saved':>12} {'ratio':>7}")
-    tot_raw = tot_kept = 0
-    for op in sorted(by_op):
-        a = by_op[op]
-        tot_raw += a["raw"]
-        tot_kept += a["kept"]
-        print(f"{op:<10} {a['n']:>6} {a['raw']:>12,} {a['kept']:>12,} "
-              f"{a['raw'] - a['kept']:>12,} {a['raw'] / max(a['kept'], 1):>6.1f}x")
-    saved = tot_raw - tot_kept
-    print(f"{'TOTAL':<10} {sum(a['n'] for a in by_op.values()):>6} {tot_raw:>12,} "
-          f"{tot_kept:>12,} {saved:>12,} {tot_raw / max(tot_kept, 1):>6.1f}x")
 
-    # Honest savings %: over real content pulls only (recon excluded), of all the
-    # bulk content the agent engaged with, how much ctx kept out of context.
-    # `read` ops (raw == kept) are the denominator of integrity -- they pull
-    # content in full and pull the percentage down, instead of vanishing the way
-    # a direct editor read would.
-    content = {op: a for op, a in by_op.items() if op not in RECON_OPS}
+    # --- CONTENT FLOW: real file content pulled for the task --------------
+    # This is the honest, headline result. `read`/`direct` ops (raw == kept)
+    # are the denominator of integrity: they admit content in full and pull the
+    # percentage down, instead of vanishing the way an untracked editor read
+    # would. Recon (map) is reported separately so it cannot inflate this.
     c_raw = sum(a["raw"] for a in content.values())
     c_kept = sum(a["kept"] for a in content.values())
     c_saved = c_raw - c_kept
-    pct = 100.0 * c_saved / max(c_raw, 1)
-    raw_via_compressor = sum(a["raw"] for op, a in content.items() if op not in RAW_OPS)
-    raw_via_read = sum(a["raw"] for op, a in content.items() if op in RAW_OPS)
-    engaged = raw_via_compressor + raw_via_read
-    coverage = 100.0 * raw_via_compressor / max(engaged, 1)
-    recon_note = " (recon ops excluded)" if len(content) != len(by_op) else ""
-    print(f"\n# saved {c_saved:,} of {c_raw:,} would-be content tokens = {pct:.0f}% "
-          f"kept out of context{recon_note}, single pass.")
-    if raw_via_read:
-        print(f"# coverage: {coverage:.0f}% of engaged content ({raw_via_compressor:,} of "
-              f"{engaged:,} tok) went through a ctx compressor; the rest was read raw.")
+    print("\nCONTENT FLOW  (real file content pulled for the task)")
+    print(f"  {'op':<10} {'calls':>6} {'raw':>12} {'admitted':>12} {'saved':>12} {'ratio':>7}")
+    for op in sorted(content):
+        a = content[op]
+        print(f"  {op:<10} {a['n']:>6} {a['raw']:>12,} {a['kept']:>12,} "
+              f"{a['raw'] - a['kept']:>12,} {a['raw'] / max(a['kept'], 1):>6.1f}x")
+    if content:
+        pct = 100.0 * c_saved / max(c_raw, 1)
+        print(f"  {'TOTAL':<10} {sum(a['n'] for a in content.values()):>6} {c_raw:>12,} "
+              f"{c_kept:>12,} {c_saved:>12,} {c_raw / max(c_kept, 1):>6.1f}x")
+        print(f"  reduction: {pct:.1f}%   ({c_raw / max(c_kept, 1):.2f}x)")
+        # Tracked file-content coverage: of the bulk content the hook/funnel SAW,
+        # how much went through a compressor vs was admitted raw. It covers only
+        # Read/Bash; Grep/Glob/MCP/sub-agent outputs are not yet counted.
+        raw_via_compressor = sum(a["raw"] for op, a in content.items() if op not in RAW_OPS)
+        raw_via_read = sum(a["raw"] for op, a in content.items() if op in RAW_OPS)
+        engaged = raw_via_compressor + raw_via_read
+        if raw_via_read:
+            cov = 100.0 * raw_via_compressor / max(engaged, 1)
+            print(f"  tracked file-content coverage: {cov:.1f}% compressed "
+                  f"({raw_via_read:,} of {engaged:,} tok read raw/direct)")
+        else:
+            print("  tracked file-content coverage: no raw reads logged -- route full")
+            print("    reads through `ctx read` or wire the `ctx hook` for true coverage.")
+        usd = c_saved / 1e6 * args.price
+        print(f"  dollar value: ~${usd:.2f} at ${args.price}/MTok (single pass; in an agent")
+        print("    loop the effect compounds as admitted tokens are re-sent each turn).")
     else:
-        print("# coverage: no `ctx read` pulls logged yet -- route full-file reads")
-        print("#           through `ctx read` so the % reflects ALL content, not just wins.")
-    usd = c_saved / 1e6 * args.price
-    print(f"# dollar value: ~${usd:.2f} at ${args.price}/MTok. In an agent loop the real")
-    print("# effect is larger: every admitted token is re-sent on each later turn.")
+        print("  (no content pulls logged yet)")
+
+    # --- RECONNAISSANCE: orientation only, excluded from savings ----------
+    if recon:
+        print("\nRECONNAISSANCE  (orientation only -- excluded from savings)")
+        for op in sorted(recon):
+            a = recon[op]
+            print(f"  {op:<10} repo estimate {a['raw']:>12,} -> output {a['kept']:>8,} "
+                  f"({a['n']} call{'s' if a['n'] != 1 else ''})")
+        print("  note: map lists the repo without reading it; its huge ratio is not a")
+        print("        real saving and is kept out of the CONTENT FLOW headline.")
+
+    print("\n# coverage tracks Read/Bash via the ctx hook; Grep/Glob/MCP/sub-agent")
+    print("# outputs are not yet counted, so true total context may be higher.")
 
     if by_provider:
         print(f"\n{'rlm provider':<16} {'calls':>6} {'sub-LM':>7} {'context tok':>12} "
@@ -1223,6 +1274,8 @@ def cmd_report(args: argparse.Namespace) -> int:
         for prov in sorted(by_provider):
             p = by_provider[prov]
             print(f"{prov:<16} {p['n']:>6} {p['calls']:>7} {p['raw']:>12,} {p['kept']:>11,}")
+    if dup:
+        print(f"# de-duplicated {dup} repeated tool_use_id record(s)")
     if bad:
         print(f"# warning: {bad} malformed ledger line(s) skipped")
     return 0
@@ -1384,6 +1437,9 @@ def main(argv: list[str] | None = None) -> int:
     rep.add_argument("--price", type=float, default=5.0,
                      help="input price $/MTok for the cost estimate (default 5.0)")
     rep.add_argument("--reset", action="store_true", help="clear the ledger")
+    rep.add_argument("--settle", type=int, default=0, metavar="MS",
+                     help="wait MS milliseconds before reading, so a trailing async "
+                          "hook write can land (default 0)")
     rep.set_defaults(fn=cmd_report)
 
     args = ap.parse_args(argv)

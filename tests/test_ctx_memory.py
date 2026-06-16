@@ -333,20 +333,41 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(ctx.cmd_hook(argparse.Namespace(min_tokens=200)), 0)
         self.assertEqual(self.ledger_records(), [])  # nothing logged either way
 
-    def test_report_excludes_recon_and_reports_coverage(self):
+    def test_hook_skips_ctx_selfcall_to_avoid_double_count(self):
+        # `ctx digest` run via Bash already self-logs; the hook must not also
+        # count its output as a raw "direct" pull.
+        payload = {
+            "tool_name": "Bash",
+            "tool_input": {"command": "ctx digest big.py"},
+            "tool_response": {"stdout": "signature " * 200},
+        }
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
+            self.assertEqual(ctx.cmd_hook(argparse.Namespace(min_tokens=10)), 0)
+        self.assertEqual(self.ledger_records(), [])  # nothing logged
+        # a non-ctx Bash command IS counted
+        payload["tool_input"]["command"] = "cat big.py"
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
+            self.assertEqual(ctx.cmd_hook(argparse.Namespace(min_tokens=10)), 0)
+        self.assertEqual([r["op"] for r in self.ledger_records()], ["direct"])
+
+    def test_report_splits_content_flow_from_recon_and_dedups(self):
         ctx.ledger_log("read", 100, 100, "f.txt")          # raw pull
         ctx.ledger_log("digest", 100, 20, "f.py")           # compressed pull
         ctx.ledger_log("map", 50000, 80, "/repo")           # recon, must not inflate %
         ctx.ledger_log("rlm", 4000, 40, "mapreduce:q", provider="gemini", calls=5)
-        args = argparse.Namespace(price=5.0, reset=False)
+        ctx.ledger_log("direct", 30, 30, "Read", tool_id="T9")
+        ctx.ledger_log("direct", 30, 30, "Read", tool_id="T9")  # duplicate, must drop
+        args = argparse.Namespace(price=5.0, reset=False, settle=0)
         with contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(ctx.cmd_report(args), 0)
         text = out.getvalue()
-        self.assertIn("recon ops excluded", text)
-        self.assertIn("coverage:", text)
-        # content saved = (100+100+4000) - (100+20+40) = 4040 of 4200 -> 96%, NOT 99%+
-        self.assertIn("96%", text)
-        self.assertIn("gemini", text)  # provider breakdown present
+        self.assertIn("CONTENT FLOW", text)
+        self.assertIn("RECONNAISSANCE", text)               # map reported separately
+        self.assertIn("tracked file-content coverage", text)
+        # content saved = (100+100+4000+30) - (100+20+40+30) = 4040 of 4230 -> 95.5%
+        self.assertIn("95.5%", text)
+        self.assertIn("de-duplicated 1", text)              # the repeated T9 dropped
+        self.assertIn("gemini", text)                       # provider breakdown present
 
 
 if __name__ == "__main__":

@@ -2,6 +2,14 @@
 
 ## Now
 
+- Hardened ledger/report after review: `report` splits CONTENT FLOW vs
+  RECONNAISSANCE (no blended ~22.9x headline); coverage renamed "tracked
+  file-content coverage" (Grep/Glob/MCP/sub-agents not yet counted); hook skips
+  ctx/rlm self-calls and dedups by tool_use_id; added `report --settle MS`;
+  removed the unsafe global `Bash(python ctx.py *)` allow.
+- Still open: SQL/CSS-aware digest (TASK-20260616-002) — do NOT just digest
+  `seed.sql` naively; the current SQL digest over-compresses, so raising coverage
+  there could hurt answer quality until that task lands.
 - Rewrote agent instructions around a context-saving ladder (memory -> CodeGraph
   -> map -> digest -> read -> run -> RLM). RLM is now optional (only with a
   configured model); CodeGraph + Obsidian memory framed as everyday savings.

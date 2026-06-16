@@ -287,9 +287,48 @@ ctx memory check
 # Show the full unsqueezed baseline for a file or project
 ctx rawcount .
 
-# Show measured context reduction
+# Show measured context reduction (CONTENT FLOW vs RECONNAISSANCE)
 ctx report
+
+# If a background coverage hook is wired, give its last async write a beat to land
+ctx report --settle 1500
 ```
+
+### Coverage Hook And The Savings Report
+
+`ctx report` separates two things on purpose:
+
+- **CONTENT FLOW** — real file content pulled for the task (`digest`, `read`,
+  `rlm`, plus `direct` reads captured by the hook). This is the honest headline:
+  reduction %, ratio, and **tracked file-content coverage**.
+- **RECONNAISSANCE** — `map` only. It lists the repo without reading it, so its
+  huge ratio is *not* a real saving and is kept out of the headline.
+
+Coverage is "tracked file-content coverage": it accounts for `Read`/`Bash` pulls
+seen by the hook and the `ctx` funnels. `Grep`/`Glob`/MCP/sub-agent outputs are
+not yet counted, so the true total context can be higher than reported.
+
+To capture reads that bypass `ctx`, wire a `PostToolUse` hook (Claude Code):
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      { "matcher": "Read|Bash",
+        "hooks": [ { "type": "command", "command": "ctx hook", "async": true } ] }
+    ]
+  }
+}
+```
+
+The hook is silent, always exits 0, never blocks the agent, skips `ctx`/`rlm`'s
+own commands (so they are not double-counted), and de-duplicates a tool call by
+its `tool_use_id`.
+
+> **Permissions / safety.** Allow only the *installed* commands —
+> `Bash(ctx *)` / `Bash(rlm *)` — never `Bash(python ctx.py *)`. A local
+> `ctx.py` takes priority over the global install, so auto-allowing
+> `python ctx.py` would let any cloned repo's `ctx.py` run without a prompt.
 
 ## RLM Sub-Agent Options
 
